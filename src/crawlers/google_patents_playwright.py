@@ -415,6 +415,13 @@ async def test_patent_family_extraction(patent_id: str = 'BR112012008823B8'):
     print(f"\n{'='*80}\n")
 
 
+# ========================================
+# BACKWARD COMPATIBILITY ALIAS
+# ========================================
+# The pool system expects 'GooglePatentsCrawler' but we renamed to 'GooglePatentsPlaywrightCrawler'
+GooglePatentsCrawler = GooglePatentsPlaywrightCrawler
+
+
 if __name__ == "__main__":
     # Run test
     asyncio.run(test_patent_family_extraction())
