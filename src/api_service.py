@@ -12,7 +12,7 @@ from .models import (
     SearchResponse,
     WorldwideApplication
 )
-from .crawlers import crawler_pool, google_patents_client, inpi_client
+from .crawlers import crawler_pool, google_patents_client, google_patents_pool, inpi_client
 from . import utils, config
 
 # Setup logging
@@ -31,8 +31,11 @@ async def lifespan(app: FastAPI):
     """Startup and shutdown events"""
     # Startup
     logger.info("🚀 Starting Pharmyrus v4.0...")
-    logger.info(f"  Initializing {config.CRAWLER_POOL_SIZE} crawlers...")
+    logger.info(f"  Initializing {config.CRAWLER_POOL_SIZE} WIPO crawlers...")
     await crawler_pool.initialize()
+    logger.info("  Initializing Google Patents crawlers...")
+    await google_patents_pool.initialize()
+    logger.info("  Initializing API clients...")
     await google_patents_client.initialize()
     await inpi_client.initialize()
     logger.info("✅ Pharmyrus v4.0 ready!")
@@ -42,6 +45,7 @@ async def lifespan(app: FastAPI):
     # Shutdown
     logger.info("🛑 Shutting down Pharmyrus v4.0...")
     await crawler_pool.close()
+    await google_patents_pool.close()
     await google_patents_client.close()
     await inpi_client.close()
     logger.info("✅ Shutdown complete")
@@ -173,6 +177,11 @@ async def get_patent_details(
     - Legal status
     - Family information
     - Data from multiple sources (Google Patents + INPI if BR)
+    
+    Strategy:
+    1. Try Google Patents Playwright (direct scraping, no rate limits)
+    2. Fallback to SerpAPI if Playwright fails
+    3. Enrich with INPI data if Brazilian patent
     """
     start_time = time.time()
     
@@ -185,19 +194,38 @@ async def get_patent_details(
     logger.info(f"  🌍 Country: {country_code} ({utils.get_country_name(country_code)})")
     
     try:
-        # Get Google Patents details
-        logger.info(f"  🔍 Fetching Google Patents data...")
-        gp_data = await google_patents_client.get_patent_details(clean_patent)
+        # Strategy 1: Try Google Patents Playwright (direct, no rate limits)
+        logger.info(f"  🔍 Fetching Google Patents data (Playwright)...")
+        gp_playwright_data = await google_patents_pool.fetch_patent(clean_patent)
+        
+        # Check if Playwright got meaningful data
+        playwright_success = (
+            gp_playwright_data.get('title') or 
+            gp_playwright_data.get('abstract') or 
+            gp_playwright_data.get('patent_family', {}).get('total_members', 0) > 0
+        )
+        
+        if playwright_success:
+            logger.info(f"  ✅ Playwright: Got data for {clean_patent}")
+            gp_data = gp_playwright_data
+            data_source = "playwright"
+        else:
+            # Strategy 2: Fallback to SerpAPI
+            logger.warning(f"  ⚠️  Playwright failed, trying SerpAPI fallback...")
+            gp_data = await google_patents_client.get_patent_details(clean_patent)
+            data_source = "serpapi"
         
         # Initialize sources dict
         sources = {
             "google_patents": {
-                "url": gp_data.get("url", ""),
+                "url": gp_data.get("url", f"https://patents.google.com/patent/{clean_patent}"),
                 "pdf_url": gp_data.get("pdf_url", ""),
-                "cpc_classifications": gp_data.get("cpc_classifications", []),
-                "ipc_classifications": gp_data.get("ipc_classifications", []),
+                "cpc_classifications": gp_data.get("classifications", {}).get("cpc", []) or gp_data.get("cpc_classifications", []),
+                "ipc_classifications": gp_data.get("classifications", {}).get("ipc", []) or gp_data.get("ipc_classifications", []),
                 "family_id": gp_data.get("family_id", ""),
-                "family_size": gp_data.get("family_size", 0)
+                "family_size": gp_data.get("patent_family", {}).get("total_members", 0) or gp_data.get("family_size", 0),
+                "data_source": data_source,
+                "family_countries": gp_data.get("patent_family", {}).get("countries", [])
             }
         }
         
@@ -236,7 +264,7 @@ async def get_patent_details(
             search_duration_seconds=round(duration, 2)
         )
         
-        logger.info(f"  ✅ Patent details retrieved")
+        logger.info(f"  ✅ Patent details retrieved ({data_source})")
         logger.info(f"  ⏱️  Duration: {utils.format_duration(duration)}")
         
         return response
