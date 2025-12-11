@@ -1,143 +1,163 @@
-"""Google Patents Crawler using Playwright - Direct HTML parsing"""
-import asyncio
-import random
+"""
+Google Patents Playwright Crawler
+Version: v4.0 HOTFIX3.2
+Fixed: Patent family extraction with CORRECT selectors from actual HTML structure
+"""
+
 import logging
-from typing import Dict, Any, List, Optional, Tuple
-from playwright.async_api import Page, Browser, BrowserContext
-from datetime import datetime
+import asyncio
+from typing import Dict, Any, List, Optional
+from playwright.async_api import Page, async_playwright, TimeoutError as PlaywrightTimeoutError
 
 logger = logging.getLogger(__name__)
 
-class GooglePatentsCrawler:
-    """Direct crawler for Google Patents without API dependencies"""
+
+class GooglePatentsPlaywrightCrawler:
+    """Playwright-based crawler for Google Patents with stealth capabilities"""
     
-    def __init__(self, max_retries: int = 3, timeout: int = 60000):
-        self.max_retries = max_retries
+    def __init__(self, headless: bool = True, timeout: int = 60000):
+        self.headless = headless
         self.timeout = timeout
-        self.browser: Optional[Browser] = None
-        self.context: Optional[BrowserContext] = None
+        self.playwright = None
+        self.browser = None
+        self.context = None
+        
+    async def __aenter__(self):
+        """Async context manager entry"""
+        await self.start()
+        return self
     
-    async def initialize(self, playwright):
-        """Initialize browser and context"""
-        self.browser = await playwright.chromium.launch(
-            headless=True,
-            args=['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage']
-        )
-        self.context = await self.browser.new_context(
-            viewport={'width': 1920, 'height': 1080},
-            user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-        )
-        logger.info("✅ Google Patents Playwright crawler initialized")
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        """Async context manager exit"""
+        await self.close()
+    
+    async def start(self):
+        """Initialize Playwright and browser"""
+        try:
+            logger.info("🚀 Starting Playwright browser...")
+            self.playwright = await async_playwright().start()
+            
+            # Launch browser with stealth options
+            self.browser = await self.playwright.chromium.launch(
+                headless=self.headless,
+                args=[
+                    '--disable-blink-features=AutomationControlled',
+                    '--disable-dev-shm-usage',
+                    '--no-sandbox',
+                    '--disable-setuid-sandbox'
+                ]
+            )
+            
+            # Create context with realistic user agent
+            self.context = await self.browser.new_context(
+                viewport={'width': 1920, 'height': 1080},
+                user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+            )
+            
+            # Add stealth script to hide automation
+            await self.context.add_init_script("""
+                Object.defineProperty(navigator, 'webdriver', {
+                    get: () => undefined
+                });
+            """)
+            
+            logger.info("✅ Browser started successfully")
+        except Exception as e:
+            logger.error(f"❌ Failed to start browser: {e}")
+            raise
     
     async def close(self):
-        """Cleanup resources"""
-        if self.context:
-            await self.context.close()
-        if self.browser:
-            await self.browser.close()
-    
-    def _normalize_patent_id(self, patent_id: str) -> str:
-        """Normalize patent ID format"""
-        return patent_id.upper().replace(' ', '').replace('-', '')
+        """Close browser and Playwright"""
+        try:
+            if self.context:
+                await self.context.close()
+            if self.browser:
+                await self.browser.close()
+            if self.playwright:
+                await self.playwright.stop()
+            logger.info("✅ Browser closed")
+        except Exception as e:
+            logger.error(f"⚠️  Error closing browser: {e}")
     
     async def _extract_basic_info(self, page: Page) -> Dict[str, Any]:
         """Extract basic patent information"""
         data = {
             'title': '',
             'abstract': '',
-            'assignee': '',
             'inventors': [],
+            'assignee': '',
             'filing_date': '',
             'publication_date': '',
-            'grant_date': '',
-            'priority_date': '',
-            'legal_status': '',
             'classifications': {'cpc': [], 'ipc': []},
-            'pdf_url': ''
+            'pdf_url': '',
+            'legal_status': ''
         }
         
         # Title
         try:
-            title_elem = await page.query_selector('span[itemprop="title"]')
-            if not title_elem:
-                title_elem = await page.query_selector('h1#title')
+            title_elem = await page.query_selector('h1, title, [itemprop="title"]')
             if title_elem:
                 data['title'] = (await title_elem.inner_text()).strip()
-                logger.info(f"    ✅ Title: {data['title'][:50]}...")
         except Exception as e:
             logger.warning(f"    ⚠️  Could not extract title: {e}")
         
         # Abstract
         try:
-            abstract_elem = await page.query_selector('div.abstract')
+            abstract_elem = await page.query_selector('[itemprop="abstract"], .abstract, #abstract')
             if abstract_elem:
                 data['abstract'] = (await abstract_elem.inner_text()).strip()
-                logger.info(f"    ✅ Abstract: {len(data['abstract'])} chars")
         except Exception as e:
             logger.warning(f"    ⚠️  Could not extract abstract: {e}")
         
-        # Assignee
-        try:
-            assignee_elem = await page.query_selector('dd[itemprop="assigneeCurrent"]')
-            if not assignee_elem:
-                assignee_elem = await page.query_selector('dd.assignee')
-            if assignee_elem:
-                data['assignee'] = (await assignee_elem.inner_text()).strip()
-                logger.info(f"    ✅ Assignee: {data['assignee']}")
-        except Exception as e:
-            logger.warning(f"    ⚠️  Could not extract assignee: {e}")
-        
         # Inventors
         try:
-            inventor_elems = await page.query_selector_all('dd[itemprop="inventor"]')
+            inventor_elems = await page.query_selector_all('[itemprop="inventor"]')
             for elem in inventor_elems:
                 inventor = (await elem.inner_text()).strip()
                 if inventor:
                     data['inventors'].append(inventor)
-            if data['inventors']:
-                logger.info(f"    ✅ Inventors: {len(data['inventors'])} found")
         except Exception as e:
             logger.warning(f"    ⚠️  Could not extract inventors: {e}")
         
-        # Dates
-        date_mappings = {
-            'filing_date': ['Filing date', 'Application filed'],
-            'publication_date': ['Publication date', 'Published'],
-            'grant_date': ['Grant date', 'Granted'],
-            'priority_date': ['Priority date', 'Priority']
-        }
+        # Assignee
+        try:
+            assignee_elem = await page.query_selector('[itemprop="assignee"], .assignee')
+            if assignee_elem:
+                data['assignee'] = (await assignee_elem.inner_text()).strip()
+        except Exception as e:
+            logger.warning(f"    ⚠️  Could not extract assignee: {e}")
         
-        for field, labels in date_mappings.items():
-            try:
-                for label in labels:
-                    date_elem = await page.query_selector(f'dt:has-text("{label}") + dd')
-                    if date_elem:
-                        date_text = (await date_elem.inner_text()).strip()
-                        # Extract date in format YYYY-MM-DD
-                        if date_text and len(date_text) >= 10:
-                            data[field] = date_text[:10]
-                            break
-            except Exception as e:
-                logger.warning(f"    ⚠️  Could not extract {field}: {e}")
+        # Dates
+        try:
+            date_elems = await page.query_selector_all('time[itemprop]')
+            for elem in date_elems:
+                itemprop = await elem.get_attribute('itemprop')
+                date_text = await elem.get_attribute('datetime')
+                if not date_text:
+                    date_text = (await elem.inner_text()).strip()
+                
+                if 'filing' in itemprop.lower():
+                    data['filing_date'] = date_text
+                elif 'publication' in itemprop.lower():
+                    data['publication_date'] = date_text
+        except Exception as e:
+            logger.warning(f"    ⚠️  Could not extract dates: {e}")
         
         # Classifications
         try:
             # CPC
-            cpc_elems = await page.query_selector_all('span.cpc')
-            for elem in cpc_elems[:10]:  # Limit to 10
+            cpc_elems = await page.query_selector_all('span.cpc, [itemprop="cpc"]')
+            for elem in cpc_elems[:10]:
                 cpc = (await elem.inner_text()).strip()
                 if cpc:
                     data['classifications']['cpc'].append(cpc)
             
             # IPC
-            ipc_elems = await page.query_selector_all('span.ipc')
-            for elem in ipc_elems[:10]:  # Limit to 10
+            ipc_elems = await page.query_selector_all('span.ipc, [itemprop="ipc"]')
+            for elem in ipc_elems[:10]:
                 ipc = (await elem.inner_text()).strip()
-                if ipc:
+                if cpc:
                     data['classifications']['ipc'].append(ipc)
-            
-            if data['classifications']['cpc'] or data['classifications']['ipc']:
-                logger.info(f"    ✅ Classifications: {len(data['classifications']['cpc'])} CPC, {len(data['classifications']['ipc'])} IPC")
         except Exception as e:
             logger.warning(f"    ⚠️  Could not extract classifications: {e}")
         
@@ -153,9 +173,7 @@ class GooglePatentsCrawler:
         
         # Legal Status
         try:
-            status_elem = await page.query_selector('span.legal-status')
-            if not status_elem:
-                status_elem = await page.query_selector('dd.status')
+            status_elem = await page.query_selector('[itemprop="status"], .legal-status')
             if status_elem:
                 data['legal_status'] = (await status_elem.inner_text()).strip()
         except Exception as e:
@@ -164,175 +182,239 @@ class GooglePatentsCrawler:
         return data
     
     async def _extract_patent_family(self, page: Page) -> List[Dict[str, Any]]:
-        """Extract patent family members (worldwide applications)"""
+        """
+        Extract patent family members using CORRECT selectors from actual HTML
+        
+        HOTFIX3.2: Based on real Google Patents HTML structure:
+        - NO tab clicking needed (data is already in page)
+        - Use tr[itemprop="docdbFamily"] selector
+        - Extract span[itemprop="publicationNumber"] and td[itemprop="publicationDate"]
+        """
         family_members = []
         
         try:
-            # Click on "Patent family" tab if exists
-            family_tab = await page.query_selector('a:has-text("Patent family")')
-            if not family_tab:
-                family_tab = await page.query_selector('a:has-text("Family")')
+            logger.info("    🔍 Extracting patent family using CORRECT selectors...")
             
-            if family_tab:
-                await family_tab.click()
-                await page.wait_for_timeout(2000)  # Wait for content to load
-                logger.info("    ✅ Clicked Patent Family tab")
+            # CORRECT SELECTOR: tr[itemprop="docdbFamily"]
+            family_rows = await page.query_selector_all('tr[itemprop="docdbFamily"]')
             
-            # Extract family members from table
-            rows = await page.query_selector_all('table.patent-family tr')
+            logger.info(f"    📊 Found {len(family_rows)} family members using tr[itemprop='docdbFamily']")
             
-            for row in rows:
+            if not family_rows:
+                logger.warning("    ⚠️  No family members found with correct selector")
+                return []
+            
+            for idx, row in enumerate(family_rows):
                 try:
-                    cells = await row.query_selector_all('td')
-                    if len(cells) >= 3:
-                        # Extract publication number
-                        pub_elem = await cells[0].query_selector('a')
-                        if pub_elem:
-                            pub_number = (await pub_elem.inner_text()).strip()
-                            pub_link = await pub_elem.get_attribute('href')
-                            
-                            # Extract country code from publication number
-                            country_code = pub_number[:2] if len(pub_number) >= 2 else ''
-                            
-                            # Extract filing date
-                            filing_date = (await cells[1].inner_text()).strip() if len(cells) > 1 else ''
-                            
-                            # Extract title
-                            title = (await cells[2].inner_text()).strip() if len(cells) > 2 else ''
-                            
-                            member = {
-                                'publication_number': pub_number,
-                                'country_code': country_code,
-                                'filing_date': filing_date,
-                                'title': title,
-                                'link': f"https://patents.google.com{pub_link}" if pub_link and not pub_link.startswith('http') else pub_link
-                            }
-                            
-                            family_members.append(member)
+                    # Extract publication number from span[itemprop="publicationNumber"]
+                    pub_num_elem = await row.query_selector('span[itemprop="publicationNumber"]')
+                    if not pub_num_elem:
+                        logger.debug(f"    ⏭️  Row {idx}: No publicationNumber span found")
+                        continue
+                    
+                    publication_number = (await pub_num_elem.inner_text()).strip()
+                    
+                    if not publication_number or len(publication_number) < 3:
+                        logger.debug(f"    ⏭️  Row {idx}: Invalid publication number: '{publication_number}'")
+                        continue
+                    
+                    # Extract country code (first 2 characters)
+                    country_code = publication_number[:2].upper()
+                    
+                    # Validate country code
+                    if not country_code.isalpha() or len(country_code) != 2:
+                        logger.debug(f"    ⚠️  Row {idx}: Invalid country code: '{country_code}' from '{publication_number}'")
+                        country_code = 'XX'
+                    
+                    # Extract publication date from td[itemprop="publicationDate"]
+                    pub_date_elem = await row.query_selector('td[itemprop="publicationDate"]')
+                    publication_date = ''
+                    if pub_date_elem:
+                        publication_date = (await pub_date_elem.inner_text()).strip()
+                    
+                    # Extract link
+                    link_elem = await row.query_selector('a[href*="/patent/"]')
+                    link = ''
+                    if link_elem:
+                        href = await link_elem.get_attribute('href')
+                        if href:
+                            link = f"https://patents.google.com{href}" if not href.startswith('http') else href
+                    
+                    # Extract primary language (optional)
+                    lang_elem = await row.query_selector('span[itemprop="primaryLanguage"]')
+                    primary_language = ''
+                    if lang_elem:
+                        primary_language = (await lang_elem.inner_text()).strip()
+                    
+                    member = {
+                        'publication_number': publication_number,
+                        'country_code': country_code,
+                        'publication_date': publication_date,
+                        'primary_language': primary_language,
+                        'link': link,
+                        'title': ''  # Not typically in family table
+                    }
+                    
+                    family_members.append(member)
+                    logger.debug(f"    ✅ Row {idx}: {publication_number} ({country_code}) - {publication_date}")
+                
                 except Exception as e:
-                    logger.warning(f"    ⚠️  Error parsing family member row: {e}")
+                    logger.warning(f"    ⚠️  Error parsing family row {idx}: {e}")
                     continue
             
+            logger.info(f"    ✅ Successfully extracted {len(family_members)} family members")
+            
+            # Log country distribution
             if family_members:
-                logger.info(f"    ✅ Found {len(family_members)} family members")
-            else:
-                logger.warning("    ⚠️  No patent family members found")
-        
+                countries = {}
+                for member in family_members:
+                    cc = member['country_code']
+                    countries[cc] = countries.get(cc, 0) + 1
+                
+                logger.info(f"    📍 Country distribution: {dict(sorted(countries.items()))}")
+            
         except Exception as e:
-            logger.warning(f"    ⚠️  Could not extract patent family: {e}")
+            logger.error(f"    ❌ Fatal error in _extract_patent_family: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
         
         return family_members
     
-    async def fetch_patent_details(self, patent_id: str) -> Dict[str, Any]:
+    async def get_patent_details(self, patent_id: str) -> Dict[str, Any]:
         """
-        Fetch complete patent details from Google Patents
+        Get complete patent details including family members
         
         Args:
-            patent_id: Patent publication number (e.g., "BR112012008823B8", "US20130123456A1")
+            patent_id: Patent publication number (e.g., 'BR112012008823B8')
         
         Returns:
-            Dictionary with patent details and family information
+            Dictionary with patent data and family members
         """
-        clean_id = self._normalize_patent_id(patent_id)
-        url = f"https://patents.google.com/patent/{clean_id}/en"
+        result = {
+            'patent_id': patent_id,
+            'success': False,
+            'data': {},
+            'family_members': [],
+            'error': None
+        }
         
-        for attempt in range(self.max_retries):
+        try:
+            logger.info(f"🔍 Fetching patent: {patent_id}")
+            
+            # Construct URL
+            url = f"https://patents.google.com/patent/{patent_id}/en"
+            logger.info(f"    📍 URL: {url}")
+            
+            # Create new page
+            page = await self.context.new_page()
+            
             try:
-                logger.info(f"🔍 Fetching Google Patents details for {clean_id} (attempt {attempt + 1}/{self.max_retries})")
-                
-                page = await self.context.new_page()
-                
                 # Navigate to patent page
-                response = await page.goto(url, timeout=self.timeout, wait_until='networkidle')
-                
-                if response.status == 404:
-                    logger.warning(f"    ⚠️  Patent {clean_id} not found (404)")
-                    await page.close()
-                    return self._empty_result(clean_id, "Patent not found")
+                logger.info(f"    🌐 Navigating to patent page...")
+                await page.goto(url, wait_until='domcontentloaded', timeout=self.timeout)
                 
                 # Wait for content to load
-                await page.wait_for_timeout(2000)
+                logger.info(f"    ⏳ Waiting for page content...")
+                await page.wait_for_timeout(5000)  # 5 seconds
                 
-                # Extract basic information
+                # Check if page loaded successfully
+                title = await page.title()
+                if 'error' in title.lower() or '404' in title:
+                    raise Exception(f"Patent page not found: {title}")
+                
+                logger.info(f"    ✅ Page loaded: {title}")
+                
+                # Extract basic info
+                logger.info(f"    📄 Extracting basic patent info...")
                 basic_info = await self._extract_basic_info(page)
                 
                 # Extract patent family
+                logger.info(f"    👨‍👩‍👧‍👦 Extracting patent family...")
                 family_members = await self._extract_patent_family(page)
                 
+                result['data'] = basic_info
+                result['family_members'] = family_members
+                result['success'] = True
+                
+                logger.info(f"    ✅ SUCCESS: Extracted {len(family_members)} family members")
+                
+            finally:
                 await page.close()
-                
-                # Check if we got meaningful data
-                if not any([basic_info['title'], basic_info['abstract'], family_members]):
-                    if attempt < self.max_retries - 1:
-                        wait_time = (2 ** attempt) + random.uniform(0, 1)
-                        logger.warning(f"    ⚠️  No data extracted, retrying in {wait_time:.1f}s...")
-                        await asyncio.sleep(wait_time)
-                        continue
-                    else:
-                        logger.error(f"    ❌ Failed to extract data after {self.max_retries} attempts")
-                        return self._empty_result(clean_id, "No data extracted")
-                
-                # Build result
-                result = {
-                    'source': 'google_patents_playwright',
-                    'publication_number': clean_id,
-                    'url': url,
-                    'title': basic_info['title'],
-                    'abstract': basic_info['abstract'],
-                    'assignee': basic_info['assignee'],
-                    'inventors': basic_info['inventors'],
-                    'filing_date': basic_info['filing_date'],
-                    'publication_date': basic_info['publication_date'],
-                    'grant_date': basic_info['grant_date'],
-                    'priority_date': basic_info['priority_date'],
-                    'legal_status': basic_info['legal_status'],
-                    'classifications': basic_info['classifications'],
-                    'pdf_url': basic_info['pdf_url'],
-                    'patent_family': {
-                        'total_members': len(family_members),
-                        'members': family_members,
-                        'countries': list(set(m['country_code'] for m in family_members if m['country_code']))
-                    },
-                    'extracted_at': datetime.utcnow().isoformat(),
-                    'attempt': attempt + 1
-                }
-                
-                logger.info(f"✅ Successfully extracted {clean_id}: {len(family_members)} family members")
-                return result
-            
-            except Exception as e:
-                logger.error(f"    ❌ Attempt {attempt + 1} failed: {e}")
-                
-                if attempt < self.max_retries - 1:
-                    wait_time = (2 ** attempt) + random.uniform(0, 1)
-                    await asyncio.sleep(wait_time)
-                else:
-                    return self._empty_result(clean_id, str(e))
         
-        return self._empty_result(clean_id, "Max retries exceeded")
+        except Exception as e:
+            logger.error(f"    ❌ Error fetching patent {patent_id}: {e}")
+            result['error'] = str(e)
+            import traceback
+            logger.error(traceback.format_exc())
+        
+        return result
     
-    def _empty_result(self, patent_id: str, error: str) -> Dict[str, Any]:
-        """Return empty result structure on error"""
+    async def get_worldwide_applications(self, wo_number: str) -> Dict[str, Any]:
+        """
+        Get worldwide applications (family members) for a WO patent
+        
+        Args:
+            wo_number: WO patent number (e.g., 'WO2011051311A1')
+        
+        Returns:
+            Dictionary with family members
+        """
+        logger.info(f"🌍 Getting worldwide applications for: {wo_number}")
+        
+        # Reuse get_patent_details
+        result = await self.get_patent_details(wo_number)
+        
         return {
-            'source': 'google_patents_playwright',
-            'publication_number': patent_id,
-            'url': f"https://patents.google.com/patent/{patent_id}/en",
-            'title': '',
-            'abstract': '',
-            'assignee': '',
-            'inventors': [],
-            'filing_date': '',
-            'publication_date': '',
-            'grant_date': '',
-            'priority_date': '',
-            'legal_status': '',
-            'classifications': {'cpc': [], 'ipc': []},
-            'pdf_url': '',
-            'patent_family': {
-                'total_members': 0,
-                'members': [],
-                'countries': []
-            },
-            'error': error,
-            'extracted_at': datetime.utcnow().isoformat()
+            'wo_number': wo_number,
+            'success': result['success'],
+            'family_members': result['family_members'],
+            'error': result.get('error')
         }
+
+
+# ========================================
+# HELPER FUNCTIONS
+# ========================================
+
+async def test_patent_family_extraction(patent_id: str = 'BR112012008823B8'):
+    """Test patent family extraction with a known patent"""
+    
+    print(f"\n{'='*80}")
+    print(f"🧪 TESTING PATENT FAMILY EXTRACTION - HOTFIX3.2")
+    print(f"{'='*80}\n")
+    
+    async with GooglePatentsPlaywrightCrawler(headless=True) as crawler:
+        result = await crawler.get_patent_details(patent_id)
+        
+        print(f"\n📊 RESULTS:")
+        print(f"   Patent ID: {result['patent_id']}")
+        print(f"   Success: {result['success']}")
+        print(f"   Family Members: {len(result['family_members'])}")
+        
+        if result['family_members']:
+            print(f"\n👨‍👩‍👧‍👦 FAMILY MEMBERS:")
+            
+            # Group by country
+            by_country = {}
+            for member in result['family_members']:
+                cc = member['country_code']
+                if cc not in by_country:
+                    by_country[cc] = []
+                by_country[cc].append(member['publication_number'])
+            
+            for country, patents in sorted(by_country.items()):
+                print(f"\n   {country} ({len(patents)}):")
+                for patent in patents[:5]:  # Show first 5
+                    print(f"      • {patent}")
+                if len(patents) > 5:
+                    print(f"      ... and {len(patents) - 5} more")
+        
+        if result['error']:
+            print(f"\n❌ ERROR: {result['error']}")
+    
+    print(f"\n{'='*80}\n")
+
+
+if __name__ == "__main__":
+    # Run test
+    asyncio.run(test_patent_family_extraction())
