@@ -269,6 +269,39 @@ class GooglePatentsPlaywrightCrawler:
             
             if not family_rows:
                 logger.warning("    ⚠️  No family members found with correct selector")
+                
+                # 🐛 DEBUG: Save HTML and screenshot for analysis
+                try:
+                    import os
+                    import datetime
+                    
+                    # Create debug directory
+                    debug_dir = "/tmp/playwright_debug"
+                    os.makedirs(debug_dir, exist_ok=True)
+                    
+                    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+                    patent_id_clean = page.url.split('/')[-2] if '/' in page.url else 'unknown'
+                    
+                    # Save HTML
+                    html_path = f"{debug_dir}/{patent_id_clean}_{timestamp}.html"
+                    html_content = await page.content()
+                    with open(html_path, 'w', encoding='utf-8') as f:
+                        f.write(html_content)
+                    logger.warning(f"    🐛 DEBUG: Saved HTML to {html_path}")
+                    
+                    # Save screenshot
+                    screenshot_path = f"{debug_dir}/{patent_id_clean}_{timestamp}.png"
+                    await page.screenshot(path=screenshot_path, full_page=True)
+                    logger.warning(f"    🐛 DEBUG: Saved screenshot to {screenshot_path}")
+                    
+                    # Log some HTML stats
+                    logger.warning(f"    🐛 DEBUG: HTML size: {len(html_content)} bytes")
+                    logger.warning(f"    🐛 DEBUG: Contains 'docdbFamily': {('docdbFamily' in html_content)}")
+                    logger.warning(f"    🐛 DEBUG: Contains 'itemprop': {('itemprop' in html_content)}")
+                    
+                except Exception as debug_err:
+                    logger.error(f"    ❌ Debug save failed: {debug_err}")
+                
                 return []
             
             for idx, row in enumerate(family_rows):
@@ -382,7 +415,28 @@ class GooglePatentsPlaywrightCrawler:
                 
                 # Wait for content to load
                 logger.info(f"    ⏳ Waiting for page content...")
-                await page.wait_for_timeout(5000)  # 5 seconds
+                await page.wait_for_timeout(3000)  # Initial 3 seconds
+                
+                # Try to wait for patent family section (may not exist on all pages)
+                try:
+                    await page.wait_for_selector('tr[itemprop="docdbFamily"], section#family', timeout=10000)
+                    logger.info("    ✅ Patent family section detected")
+                except:
+                    logger.warning("    ⚠️  Patent family section not found after 10s wait")
+                
+                # Additional wait for JavaScript to complete
+                await page.wait_for_timeout(2000)
+                
+                # Try clicking "Family" tab if it exists (some pages have tabs)
+                try:
+                    family_tab = await page.query_selector('a:has-text("Family"), button:has-text("Family")')
+                    if family_tab:
+                        logger.info("    🖱️  Clicking Family tab...")
+                        await family_tab.click()
+                        await page.wait_for_timeout(2000)
+                        logger.info("    ✅ Family tab clicked")
+                except Exception as tab_err:
+                    logger.debug(f"    ℹ️  No Family tab to click (expected): {tab_err}")
                 
                 # Check if page loaded successfully
                 title = await page.title()
