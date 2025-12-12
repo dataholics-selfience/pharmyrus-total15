@@ -15,9 +15,10 @@ logger = logging.getLogger(__name__)
 class GooglePatentsPlaywrightCrawler:
     """Playwright-based crawler for Google Patents with stealth capabilities"""
     
-    def __init__(self, headless: bool = True, timeout: int = 60000):
+    def __init__(self, headless: bool = True, timeout: int = 60000, max_retries: int = 3):
         self.headless = headless
         self.timeout = timeout
+        self.max_retries = max_retries  # For compatibility with pool initialization
         self.playwright = None
         self.browser = None
         self.context = None
