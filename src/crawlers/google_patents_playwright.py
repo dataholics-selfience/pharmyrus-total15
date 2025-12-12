@@ -80,6 +80,72 @@ class GooglePatentsPlaywrightCrawler:
         except Exception as e:
             logger.error(f"⚠️  Error closing browser: {e}")
     
+    # ========================================
+    # POOL COMPATIBILITY METHODS
+    # ========================================
+    
+    async def initialize(self, playwright_instance=None):
+        """
+        Initialize crawler (pool compatibility method)
+        
+        Args:
+            playwright_instance: Optional Playwright instance from pool
+                                If provided, use it instead of creating new one
+        """
+        if playwright_instance:
+            # Use shared Playwright instance from pool
+            self.playwright = playwright_instance
+            
+            # Launch browser with stealth options
+            self.browser = await self.playwright.chromium.launch(
+                headless=self.headless,
+                args=[
+                    '--disable-blink-features=AutomationControlled',
+                    '--disable-dev-shm-usage',
+                    '--no-sandbox',
+                    '--disable-setuid-sandbox'
+                ]
+            )
+            
+            # Create context
+            self.context = await self.browser.new_context(
+                viewport={'width': 1920, 'height': 1080},
+                user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+            )
+            
+            # Add stealth script
+            await self.context.add_init_script("""
+                Object.defineProperty(navigator, 'webdriver', {
+                    get: () => undefined
+                });
+            """)
+            
+            logger.info("✅ Browser initialized (pool mode)")
+        else:
+            # Standalone mode - use start()
+            await self.start()
+    
+    async def fetch_patent_details(self, patent_id: str) -> dict:
+        """
+        Fetch patent details (pool compatibility method)
+        
+        Args:
+            patent_id: Patent publication number
+        
+        Returns:
+            Dictionary with patent data (pool-compatible format)
+        """
+        result = await self.get_patent_details(patent_id)
+        
+        # Convert to pool-expected format
+        return {
+            'publication_number': patent_id,
+            'success': result.get('success', False),
+            'family_members': result.get('family_members', []),
+            'data': result.get('data', {}),
+            'error': result.get('error')
+        }
+    
     async def _extract_basic_info(self, page: Page) -> Dict[str, Any]:
         """Extract basic patent information"""
         data = {
