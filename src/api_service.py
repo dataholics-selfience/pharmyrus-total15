@@ -70,6 +70,14 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Debug endpoints (for HTML/screenshot retrieval)
+try:
+    from .debug_endpoints import router as debug_router
+    app.include_router(debug_router)
+    logger.info("✅ Debug endpoints enabled at /debug/*")
+except Exception as e:
+    logger.warning(f"⚠️  Debug endpoints not loaded: {e}")
+
 # ============================================================================
 # ENDPOINT 1: WO Details (ALL countries)
 # ============================================================================

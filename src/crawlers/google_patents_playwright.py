@@ -299,10 +299,26 @@ class GooglePatentsPlaywrightCrawler:
                     logger.warning(f"    🐛 DEBUG: Contains 'docdbFamily': {('docdbFamily' in html_content)}")
                     logger.warning(f"    🐛 DEBUG: Contains 'itemprop': {('itemprop' in html_content)}")
                     
+                    # SAVE LAST HTML PATH for debug endpoint
+                    self._last_debug_html_path = html_path
+                    self._last_debug_screenshot_path = screenshot_path
+                    
                 except Exception as debug_err:
                     logger.error(f"    ❌ Debug save failed: {debug_err}")
                 
                 return []
+    
+    def get_last_debug_html(self) -> dict:
+        """
+        Get last saved debug HTML and screenshot paths
+        
+        Returns:
+            Dictionary with paths to debug files
+        """
+        return {
+            'html_path': getattr(self, '_last_debug_html_path', None),
+            'screenshot_path': getattr(self, '_last_debug_screenshot_path', None)
+        }
             
             for idx, row in enumerate(family_rows):
                 try:
